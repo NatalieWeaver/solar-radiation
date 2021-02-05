@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="" xml:lang="">
+  <head>
+    <title>Predicting Solar Radiation ☀️</title>
+    <meta charset="utf-8" />
+    <meta name="author" content="Natalie Weaver" />
+    <meta name="date" content="2021-02-05" />
+    <link href="libs/remark-css-0.0.1/default.css" rel="stylesheet" />
+    <link href="libs/remark-css-0.0.1/metropolis.css" rel="stylesheet" />
+    <link href="libs/remark-css-0.0.1/metropolis-fonts.css" rel="stylesheet" />
+  </head>
+  <body>
+    <textarea id="source">
+class: center, middle, inverse, title-slide
+
+# Predicting Solar Radiation ☀️
+## at the HI-SEAS Mars habitat
+### Natalie Weaver
+### 05 February 2021
+
+---
+
+exclude: true
+
+
+
+---
+layout: true
+# The Question: can we predict the level of solar radiation (amount of sunlight) using other meteorological data?
+
+---
+layout: true
+# The Data
+
+---
+class: inverse, middle
+---
+name: the-data-source
+## The source
+
+.pull-left[
+Collected at the [HI-SEAS](https://hi-seas.org/) Mars habitat weather station
+
+* Habitat used by NASA for human behavior research in conditions simulating a long-term mission to Mars
+* Data collected September through December of 2016
+* 32,686 observations
+
+Downloaded from Kaggle
+
+* Published by NASA for a hackathon challenge
+* Uploaded by user [Andrey](https://www.kaggle.com/dronio) in 2017
+]
+
+.pull-right[
+![Image of HI-SEAS](hi-seas-2.jpg)
+]
+
+---
+name: the-data-variables
+## The variables
+
+
+
+&lt;img src="presentation_files/figure-html/visualize-data-1.png" style="display: block; margin: auto;" /&gt;
+
+Also the date and time of the observation, and the sunrise and sunset times for the date of the observation.
+
+---
+name: the-data-feature-engineering
+## Feature engineering
+
+`is_daytime` (logical):
+
+* `0` if an observation occurred after sunrise and before sunset (the daytime)
+* `1` otherwise (observation occurred at night).
+
+`wind_direction_factor` (factor)
+
+* `"north"` if wind angle was &lt; 45° or &gt; 315° (i.e. within 45° of due North)
+* `"east"` if wind angle was &gt; 45° and &lt; 135°
+* `"south"` if wind angle was &gt; 135° and &lt; 225°
+* `"west"` if wind angle was &gt; 225° and &lt; 315°
+
+
+
+---
+name: the-data-radiation-1
+## Updated radiation histograms
+
+&lt;img src="presentation_files/figure-html/visualize-radiation-1.png" style="display: block; margin: auto;" /&gt;
+
+---
+name: the-data-radiation-2
+## Scatterplot of radiation against time of day
+
+&lt;img src="presentation_files/figure-html/visualize-radiation-2-1.png" style="display: block; margin: auto;" /&gt;
+
+Most of the near-0 daytime radiation values were observed at dawn and dusk.
+
+---
+name: the-data-wind-direction
+## Bar chart of wind direction
+
+&lt;img src="presentation_files/figure-html/visualize-wind-1.png" style="display: block; margin: auto;" /&gt;
+
+---
+layout: true
+# Prediction Models
+
+---
+class: inverse, middle
+---
+name: prediction-models-plan
+## The plan of attack
+
+Try to predict the level of solar radiation using three machine learning methods:
+
+* Penalized regression (elasticnet)
+* K-Nearest Neighbors
+* Tree-based methods (decision trees, random forest)
+
+Evaluate the models by calculating the RMSE of their predictions on held-out test data.
+
+---
+name: prediction-models-data-prep
+## Data preparation
+
+Before we can fit these models, we need to prepare the data:
+
+* Add an `id` column to number the rows, easier to keep track of
+* Throw out `wind-direction-degrees` and `unix-time`
+* Convert all dates and times to doubles so they play nice with model fitting functions
+* Create a standardized version of the data for KNN and elasticnet models (and keep the original data to use for tree-based models)
+* Hold out 20% of the data to evaluate model performance at the very end.
+
+
+
+
+
+
+
+---
+name: prediction-models-elasticnet-1
+## Elasticnet model
+
+How it works:
+
+* Linear combination of Ridge and LASSO regressions
+  * Ridge: OLS with shrinkage penalty equal to sum of squared coefficients
+  * LASSO: OLS with shrinkage penalty equal to sum of absolute coefficients
+
+Parameters to tune:
+
+* `λ`: scalar for the shrinkage penalty
+* `α`: balance between Ridge and LASSO
+  * `0` = 100% Ridge
+  * `1` = 100% LASSO
+
+Expected performance:
+* Not the best -- radiation is very non-linear with respect to time of day
+
+---
+name: prediction-models-elasticnet-2
+## Training the elasticnet model
+
+.pull-left[
+
+```r
+# set a new seed for this chunk
+set.seed(83352)
+
+lambdas = seq(from = 0, to = 4, by = 0.1)
+alphas = seq(from = 0, to = 1, by = 0.05)
+
+elasticnet &lt;- train(
+  # the model: regress radiation on all predictors
+  radiation ~ .,
+  data = train_std %&gt;% select(-id),
+  method = "glmnet",
+  # evaluate performance with 5-fold cross validation
+  trControl = trainControl("cv", number = 5),
+  # the tuning parameters: alphas and lambdas defined above
+  tuneGrid = expand.grid(
+    alpha = alphas, 
+    lambda = lambdas
+  )
+)
+```
+]
+
+.pull-right[
+&lt;img src="presentation_files/figure-html/elasticnet-model-viz-1.png" style="display: block; margin: auto;" /&gt;
+]
+
+
+
+---
+name: prediction-models-knn-1
+## K-Nearst Neighbors model
+
+How it works:
+
+* Given an unlabeled observation of where we need to predict the radiation...
+* Find the `\(k\)` closest labeled observations...
+* The mean of their radiation values is our predicted radiation for the unlabeled observation
+
+Parameters to tune:
+
+* `k`: the number of neighbors to use
+
+Expected performance:
+* Better than any regression-based method -- does not require radiation to be linear with respect to predictors
+* Beware of the curse of dimensionality
+
+---
+name: prediction-models-knn-2
+## Training three KNN models
+
+.pull-left[
+
+```r
+# set new seed for this code chunk
+set.seed(86129)
+
+knn_med &lt;- train(
+  # the model: predict radiation based several variables
+  radiation ~ time + is_daytime + date +
+    temperature + pressure + humidity,
+  data = train_std %&gt;% select(-id),
+  method = "knn",
+  # tune parameters using 5-fold cross-validation
+  trControl = trainControl("cv", number = 5),
+  # tuning parameter: number of neighbors, k
+  tuneGrid = expand.grid(k = seq(1, 50, by = 1))
+)
+```
+]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+.pull-right[
+&lt;img src="presentation_files/figure-html/show-knn-1.png" style="display: block; margin: auto;" /&gt;
+]
+
+---
+name: prediction-models-trees-1
+## Tree-based models
+
+How they work:
+* Trees: at each step, find the best way to split the data (greedy algorithm)
+* Forests: combine many individual trees
+  * Create `\(B\)` bootstrapped samples
+  * Train a tree on each sample, and at each split, only consider `\(m\)` variables
+  * Aggregate across bootstrapped trees to get final model
+  
+Parameters to tune:
+* `cp`: complexity parameter used for pruning
+* `mtry`: number of variables to consider at each split
+* `min.node.size`: the smallest number of observations allowed in a node
+
+Expected performance:
+* Single tree: probably better than elasticnet, not sure how it will compare to KNN
+* Forest: better than any single tree, likely better than KNN
+
+---
+name: prediction-models-single-tree
+## Training individual tree models
+
+.pull-left[
+
+```r
+set.seed(64395)
+
+tree_small &lt;- train(
+  # use only is_daytime and temp as predictors
+  radiation ~ .,
+  data = train %&gt;% 
+    select(is_daytime, temperature, radiation),
+  
+  method = "rpart",
+  
+  # tune cp using 5-fold cross-validation
+  trControl = trainControl("cv", number = 5),
+  tuneGrid = data.frame(cp = seq(0.01, 0.2, by = 0.01))
+)
+```
+]
+
+.pull-right[
+&lt;img src="presentation_files/figure-html/tree-model-2-viz-1.png" style="display: block; margin: auto;" /&gt;
+]
+
+
+
+
+
+
+
+---
+name: prediction-models-tree-diagram
+## What does the tree look like?
+
+&lt;img src="presentation_files/figure-html/tree-model-viz-2-1.png" style="display: block; margin: auto;" /&gt;
+---
+name: prediction-models-forest
+## Training a random forest
+
+.pull-left[
+
+```r
+# set a new seed for this chunk
+set.seed(42712)
+
+# random forest model
+forest = train(
+  # The model: predict radiation based on everything else
+  radiation ~ .,
+  # The data: non-standardized
+  data = train %&gt;% select(-id),
+  # Implement random forest with 100 trees
+  method = "ranger",
+  num.trees = 100,
+  # Evaluate performance with out-of-bag error estimation
+  trControl = trainControl(method = "oob"),
+  # Tuning parameters
+  tuneGrid = expand.grid(
+    "mtry" = c(1, 2, 3, 4, 5, 6, 7, 8),
+    "splitrule" = "variance",
+    "min.node.size" = 1:10
+  )
+)
+```
+]
+
+.pull-right[
+&lt;img src="presentation_files/figure-html/forest-model-viz-1.png" style="display: block; margin: auto;" /&gt;
+]
+
+
+---
+layout: true
+# Results
+
+---
+class: inverse, middle
+---
+name: results-model-performances
+## How well did the models perform on data they have never seen?
+
+
+
+&lt;img src="presentation_files/figure-html/evaluation-viz-1.png" style="display: block; margin: auto;" /&gt;
+
+---
+name: conclusion
+## Conclusions
+
+* As expected, the best model was the random forest and the worst was the elasticnet
+* The standard deviation of radiation values in the data was 315.92 watts per square meter, and our best model had a test RMSE of 78.26 watts per square meter, about 1/4 of the standard deviation
+* So our model predictions were pretty good, but not perfect
+    </textarea>
+<style data-target="print-only">@media screen {.remark-slide-container{display:block;}.remark-slide-scaler{box-shadow:none;}}</style>
+<script src="https://remarkjs.com/downloads/remark-latest.min.js"></script>
+<script>var slideshow = remark.create({
+"highlightStyle": "github",
+"countIncrementalSlides": false
+});
+if (window.HTMLWidgets) slideshow.on('afterShowSlide', function (slide) {
+  window.dispatchEvent(new Event('resize'));
+});
+(function(d) {
+  var s = d.createElement("style"), r = d.querySelector(".remark-slide-scaler");
+  if (!r) return;
+  s.type = "text/css"; s.innerHTML = "@page {size: " + r.style.width + " " + r.style.height +"; }";
+  d.head.appendChild(s);
+})(document);
+
+(function(d) {
+  var el = d.getElementsByClassName("remark-slides-area");
+  if (!el) return;
+  var slide, slides = slideshow.getSlides(), els = el[0].children;
+  for (var i = 1; i < slides.length; i++) {
+    slide = slides[i];
+    if (slide.properties.continued === "true" || slide.properties.count === "false") {
+      els[i - 1].className += ' has-continuation';
+    }
+  }
+  var s = d.createElement("style");
+  s.type = "text/css"; s.innerHTML = "@media print { .has-continuation { display: none; } }";
+  d.head.appendChild(s);
+})(document);
+// delete the temporary CSS (for displaying all slides initially) when the user
+// starts to view slides
+(function() {
+  var deleted = false;
+  slideshow.on('beforeShowSlide', function(slide) {
+    if (deleted) return;
+    var sheets = document.styleSheets, node;
+    for (var i = 0; i < sheets.length; i++) {
+      node = sheets[i].ownerNode;
+      if (node.dataset["target"] !== "print-only") continue;
+      node.parentNode.removeChild(node);
+    }
+    deleted = true;
+  });
+})();
+(function() {
+  "use strict"
+  // Replace <script> tags in slides area to make them executable
+  var scripts = document.querySelectorAll(
+    '.remark-slides-area .remark-slide-container script'
+  );
+  if (!scripts.length) return;
+  for (var i = 0; i < scripts.length; i++) {
+    var s = document.createElement('script');
+    var code = document.createTextNode(scripts[i].textContent);
+    s.appendChild(code);
+    var scriptAttrs = scripts[i].attributes;
+    for (var j = 0; j < scriptAttrs.length; j++) {
+      s.setAttribute(scriptAttrs[j].name, scriptAttrs[j].value);
+    }
+    scripts[i].parentElement.replaceChild(s, scripts[i]);
+  }
+})();
+(function() {
+  var links = document.getElementsByTagName('a');
+  for (var i = 0; i < links.length; i++) {
+    if (/^(https?:)?\/\//.test(links[i].getAttribute('href'))) {
+      links[i].target = '_blank';
+    }
+  }
+})();</script>
+
+<script>
+slideshow._releaseMath = function(el) {
+  var i, text, code, codes = el.getElementsByTagName('code');
+  for (i = 0; i < codes.length;) {
+    code = codes[i];
+    if (code.parentNode.tagName !== 'PRE' && code.childElementCount === 0) {
+      text = code.textContent;
+      if (/^\\\((.|\s)+\\\)$/.test(text) || /^\\\[(.|\s)+\\\]$/.test(text) ||
+          /^\$\$(.|\s)+\$\$$/.test(text) ||
+          /^\\begin\{([^}]+)\}(.|\s)+\\end\{[^}]+\}$/.test(text)) {
+        code.outerHTML = code.innerHTML;  // remove <code></code>
+        continue;
+      }
+    }
+    i++;
+  }
+};
+slideshow._releaseMath(document);
+</script>
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+(function () {
+  var script = document.createElement('script');
+  script.type = 'text/javascript';
+  script.src  = 'https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-MML-AM_CHTML';
+  if (location.protocol !== 'file:' && /^https?:/.test(script.src))
+    script.src  = script.src.replace(/^https?:/, '');
+  document.getElementsByTagName('head')[0].appendChild(script);
+})();
+</script>
+  </body>
+</html>

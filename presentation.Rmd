@@ -1,0 +1,849 @@
+---
+title: "Predicting Solar Radiation ☀️"
+subtitle: "at the HI-SEAS Mars habitat"
+author: "Natalie Weaver"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  xaringan::moon_reader:
+    css: ["default", "metropolis", "metropolis-fonts"]
+    lib_dir: libs
+    nature:
+      highlightStyle: github
+      countIncrementalSlides: false
+---
+exclude: true
+
+```{r, setup, include = FALSE}
+# load packages
+library(pacman)
+p_load(tidyverse, magrittr, janitor, DT, lubridate, viridis, knitr, cowplot, caret, rpart, rpart.plot)
+
+# knitr options
+opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  echo = FALSE,
+  eval = TRUE,
+  cache = TRUE,
+  fig.height = 3.5,
+  fig.align = "center",
+  dpi = 500)
+
+options(knitr.table.format = "html")
+
+# text size for ggplots
+font_size <- 10
+```
+
+---
+layout: true
+# The Question: can we predict the level of solar radiation (amount of sunlight) using other meteorological data?
+
+---
+layout: true
+# The Data
+
+---
+class: inverse, middle
+---
+name: the-data-source
+## The source
+
+.pull-left[
+Collected at the [HI-SEAS](https://hi-seas.org/) Mars habitat weather station
+
+* Habitat used by NASA for human behavior research in conditions simulating a long-term mission to Mars
+* Data collected September through December of 2016
+* 32,686 observations
+
+Downloaded from Kaggle
+
+* Published by NASA for a hackathon challenge
+* Uploaded by user [Andrey](https://www.kaggle.com/dronio) in 2017
+]
+
+.pull-right[
+![Image of HI-SEAS](hi-seas-2.jpg)
+]
+
+---
+name: the-data-variables
+## The variables
+
+```{r, load-data}
+# read in the data using read_csv from readr in the tidyverse
+# reformat the names using clean_names from janitor
+data <- read_csv("SolarPrediction.csv") %>% clean_names() %>%
+  rename(date = data) # rename data column to date
+
+```
+
+```{r, visualize-data, fig.height = 3.5}
+radiation_hist <- ggplot(data = data, aes(x = radiation)) +
+  geom_histogram(fill = "#440154FF") +
+  labs(
+    title = "Radiation (sunlight)",
+    x = "Radiation (watts per square meter)"
+  ) +
+  theme(text = element_text(size = font_size))
+
+temperature_hist <- ggplot(data = data, aes(x = temperature)) +
+  geom_histogram(fill = "#404788FF") +
+  scale_x_continuous(labels = function(x) paste0(x, "°")) +
+  labs(
+    title = "Temperature",
+    x = "Temperature (degrees Fahrenheit)"
+  ) +
+  theme(text = element_text(size = font_size))
+
+pressure_hist <- ggplot(data = data, aes(x = pressure)) +
+  geom_histogram(fill = "#287D8EFF") +
+  labs(
+    title = "Pressure",
+    x = "Pressure (inches of Hg)"
+  ) +
+  theme(text = element_text(size = font_size))
+
+humidity_hist <- ggplot(data = data, aes(x = humidity)) +
+  geom_histogram(fill = "#29AF7FFF") +
+  scale_x_continuous(labels = function(x) paste0(x, "%")) +
+  labs(
+    title = "Humidity",
+    x = "Humidity (percentage)"
+  ) +
+  theme(text = element_text(size = font_size))
+
+direction_hist <- ggplot(data = data, aes(x = wind_direction_degrees)) +
+  geom_histogram(fill = "#95D840FF") +
+  scale_x_continuous(labels = function(x) paste0(x, "°")) +
+  labs(
+    title = "Wind Direction (angle)",
+    x = "Wind Direction (degrees clockwise from North)"
+  ) +
+  theme(text = element_text(size = font_size))
+
+speed_hist <- ggplot(data = data, aes(x = speed)) +
+  geom_histogram(fill = "#95D840FF") +
+  labs(
+    title = "Wind Speed",
+    x = "Wind Speed (miles per hour)"
+  ) +
+  theme(text = element_text(size = font_size))
+
+plot_grid(radiation_hist, temperature_hist, pressure_hist, humidity_hist, direction_hist, speed_hist, ncol = 2)
+```
+
+Also the date and time of the observation, and the sunrise and sunset times for the date of the observation.
+
+---
+name: the-data-feature-engineering
+## Feature engineering
+
+`is_daytime` (logical):
+
+* `0` if an observation occurred after sunrise and before sunset (the daytime)
+* `1` otherwise (observation occurred at night).
+
+`wind_direction_factor` (factor)
+
+* `"north"` if wind angle was < 45° or > 315° (i.e. within 45° of due North)
+* `"east"` if wind angle was > 45° and < 135°
+* `"south"` if wind angle was > 135° and < 225°
+* `"west"` if wind angle was > 225° and < 315°
+
+```{r, feature-engineering}
+# create is_daytime boolean variable
+data <- data %>% mutate(
+  is_daytime = as.numeric((time > time_sun_rise) & (time < time_sun_set))
+)
+
+# create wind direction factor variable
+data <- data %>% mutate(
+  wind_direction_factor = case_when(
+    wind_direction_degrees <= 45 ~ "north",
+    wind_direction_degrees <= 135 ~ "east",
+    wind_direction_degrees <= 225 ~ "south",
+    wind_direction_degrees <= 315 ~ "west",
+    wind_direction_degrees > 315 ~ "north"
+  )
+)
+```
+
+---
+name: the-data-radiation-1
+## Updated radiation histograms
+
+```{r, visualize-radiation, fig.height = 3.5}
+# distribution of radiation values during the daytime
+rad_day_hist <- ggplot(data = data %>% filter(is_daytime == 1), aes(x = radiation)) +
+  geom_histogram(fill = "#F68F46FF") +
+  labs(
+    title = "Daytime Radiation",
+    x = "Radiation (watts per square meter)"
+  ) 
+
+# distribution of radiation values during the night
+rad_night_hist <- ggplot(data = data %>% filter(is_daytime == 0), aes(x = radiation)) +
+  geom_histogram(fill = "#403891FF") +
+  labs(
+    title = "Nighttime Radiation",
+    x = "Radiation (watts per square meter)"
+  )
+
+# distribution of radiation, colored by day/night
+rad_fill_hist <- ggplot(data = data, aes(x = radiation)) +
+  geom_histogram(aes(fill = factor(is_daytime))) +
+  labs(
+    title = "Radiation Filled by Day/Night",
+    x = "Radiation (watts per square meter)",
+    fill = ""
+  ) +
+  scale_fill_viridis(discrete = TRUE, labels = c("Night", "Day"), option = "magma", begin = 0.2, end = 0.8)
+
+# show the plots
+day_night <- plot_grid(rad_day_hist, rad_night_hist, ncol = 2)
+plot_grid(day_night, rad_fill_hist, nrow = 2)
+```
+
+---
+name: the-data-radiation-2
+## Scatterplot of radiation against time of day
+
+```{r, visualize-radiation-2, fig.height = 3.5}
+# scatterplot of radiation vs local time
+ggplot(data = data, aes(x = time, y = radiation)) +
+  geom_point(aes(color = factor(is_daytime)), alpha = 0.2) +
+  labs(
+    title = "Solar Radiation vs. Time of Day",
+    x = "Hawaii Local Time",
+    y = "Radiation (watts per square meter)",
+    color = ""
+  ) +
+  scale_color_viridis(discrete = TRUE, labels = c("Night", "Day"), option = "magma", begin = 0.2, end = 0.8)
+```
+
+Most of the near-0 daytime radiation values were observed at dawn and dusk.
+
+---
+name: the-data-wind-direction
+## Bar chart of wind direction
+
+```{r, visualize-wind}
+# bar chart of number of observations of wind from each direction
+wind_count_bar <- ggplot(data = data, aes(x = wind_direction_factor)) +
+  geom_bar(stat = "count", aes(fill = wind_direction_factor)) +
+  labs(
+    title = "Count of Oberservations by Cardinal Direction",
+    x = "Wind Direction",
+    y = "Number of Observations",
+    fill = "Direction"
+  ) +
+  geom_text(aes(label = ..count..), stat = "count", vjust = -0.5, size = 3) +
+  coord_cartesian(ylim = c(0, 16000)) +
+  scale_fill_viridis(discrete = TRUE)
+
+wind_count_bar
+```
+
+---
+layout: true
+# Prediction Models
+
+---
+class: inverse, middle
+---
+name: prediction-models-plan
+## The plan of attack
+
+Try to predict the level of solar radiation using three machine learning methods:
+
+* Penalized regression (elasticnet)
+* K-Nearest Neighbors
+* Tree-based methods (decision trees, random forest)
+
+Evaluate the models by calculating the RMSE of their predictions on held-out test data.
+
+---
+name: prediction-models-data-prep
+## Data preparation
+
+Before we can fit these models, we need to prepare the data:
+
+* Add an `id` column to number the rows, easier to keep track of
+* Throw out `wind-direction-degrees` and `unix-time`
+* Convert all dates and times to doubles so they play nice with model fitting functions
+* Create a standardized version of the data for KNN and elasticnet models (and keep the original data to use for tree-based models)
+* Hold out 20% of the data to evaluate model performance at the very end.
+
+```{r, adjust-columns}
+# create an id column
+data <- data %>% mutate(id = row_number()) %>% relocate(id)
+
+# drop unix_time and wind_direction_degrees
+data <- data %>% select(-unix_time, -wind_direction_degrees)
+
+# reformat the date
+data <- data %>% mutate(date = str_replace(date, " 12:00:00 AM", "")) %>% 
+  mutate(date = mdy(date))
+
+# convert all dates and times to doubles
+data <- data %>% mutate(
+  date = as.numeric(date),
+  time = as.numeric(time),
+  time_sun_rise = as.numeric(time_sun_rise),
+  time_sun_set = as.numeric(time_sun_set)
+)
+```
+
+```{r, standardize-data}
+# create dummy variables
+data_dummy <- dummyVars(
+    radiation ~ .,
+    data = data %>% select(-id),
+    fullRank = TRUE
+  ) %>% 
+  predict(newdata = data) %>% 
+  as.data.frame()
+
+# standardize the non-boolean variables
+# also don't standardize the id and outcome
+data_std <- preProcess(
+    x = data %>% select(-is_daytime, -id, -radiation),
+    method = c("center", "scale")
+  ) %>% 
+  predict(newdata = data_dummy) %>% 
+  as.data.frame()
+
+# add back in the id and radiation columns
+# which we took out in the processing of dummying and standardizing
+data_std %<>% mutate(
+    id = data$id,
+    radiation = data$radiation
+  ) %>%
+  relocate(id)
+```
+
+```{r, split-data}
+# set seed
+set.seed(46848)
+
+# randomly select 20% of the data to be used for testing
+test_rows <- sample(
+    x = data$id,
+    size = nrow(data) * 0.2,
+    replace = FALSE
+  ) %>% as.numeric()
+
+# split regular data
+train <- data %>% filter(!id %in% test_rows)
+test <- data %>% filter(id %in% test_rows) %>% select(-radiation)
+
+# split standardized data
+train_std <- data_std %>% filter(!id %in% test_rows)
+test_std <- data_std %>% filter(id %in% test_rows) %>% select(-radiation)
+```
+
+---
+name: prediction-models-elasticnet-1
+## Elasticnet model
+
+How it works:
+
+* Linear combination of Ridge and LASSO regressions
+  * Ridge: OLS with shrinkage penalty equal to sum of squared coefficients
+  * LASSO: OLS with shrinkage penalty equal to sum of absolute coefficients
+
+Parameters to tune:
+
+* `λ`: scalar for the shrinkage penalty
+* `α`: balance between Ridge and LASSO
+  * `0` = 100% Ridge
+  * `1` = 100% LASSO
+
+Expected performance:
+* Not the best -- radiation is very non-linear with respect to time of day
+
+---
+name: prediction-models-elasticnet-2
+## Training the elasticnet model
+
+.pull-left[
+```{r, elasticnet-model, echo = TRUE}
+# set a new seed for this chunk
+set.seed(83352)
+
+lambdas = seq(from = 0, to = 4, by = 0.1)
+alphas = seq(from = 0, to = 1, by = 0.05)
+
+elasticnet <- train(
+  # the model: regress radiation on all predictors
+  radiation ~ .,
+  data = train_std %>% select(-id),
+  method = "glmnet",
+  # evaluate performance with 5-fold cross validation
+  trControl = trainControl("cv", number = 5),
+  # the tuning parameters: alphas and lambdas defined above
+  tuneGrid = expand.grid(
+    alpha = alphas, 
+    lambda = lambdas
+  )
+)
+
+```
+]
+
+.pull-right[
+```{r, elasticnet-model-viz, fig.width = 3}
+elasticnet_tile <- ggplot(
+    data = elasticnet$results, #%>% filter(alpha > 0),
+    aes(x = alpha, y = lambda)
+  ) +
+  geom_tile(aes(fill = RMSE)) +
+  labs(
+    title = "Elasticnet: Tuning α and λ",
+    subtitle = "Using 5-fold CV to minimize RMSE",
+    x = "α (0 = ridge, 1 = lasso)",
+    y = "λ (shrinkage penalty)"
+  ) +
+  scale_fill_viridis(option = "plasma", begin = 0, end = 1)
+
+elasticnet_tile
+```
+]
+
+```{r, elasticnet-model-predict}
+# make vector of predictions
+elasticnet_pred <- elasticnet %>% predict(newdata = test_std)
+
+# make dataframe to compare with actual values
+elasticnet_df <- data.frame(
+  id = test_std %>% select(id),
+  radiation = data_std %>% 
+    filter(id %in% test_rows) %>% 
+    select(radiation),
+  pred = elasticnet_pred
+)
+```
+
+---
+name: prediction-models-knn-1
+## K-Nearst Neighbors model
+
+How it works:
+
+* Given an unlabeled observation of where we need to predict the radiation...
+* Find the $k$ closest labeled observations...
+* The mean of their radiation values is our predicted radiation for the unlabeled observation
+
+Parameters to tune:
+
+* `k`: the number of neighbors to use
+
+Expected performance:
+* Better than any regression-based method -- does not require radiation to be linear with respect to predictors
+* Beware of the curse of dimensionality
+
+---
+name: prediction-models-knn-2
+## Training three KNN models
+
+.pull-left[
+```{r, knn-model-3, echo = TRUE}
+# set new seed for this code chunk
+set.seed(86129)
+
+knn_med <- train(
+  # the model: predict radiation based several variables
+  radiation ~ time + is_daytime + date +
+    temperature + pressure + humidity,
+  data = train_std %>% select(-id),
+  method = "knn",
+  # tune parameters using 5-fold cross-validation
+  trControl = trainControl("cv", number = 5),
+  # tuning parameter: number of neighbors, k
+  tuneGrid = expand.grid(k = seq(1, 50, by = 1))
+)
+```
+]
+
+```{r, knn-model-1}
+# set new seed for this code chunk
+set.seed(98329)
+
+# KNN model with only time, is_daytime, and temperature
+knn_small <- train(
+  # the model: predict radiation based on time, is_daytime and temperature
+  radiation ~ time + is_daytime + temperature,
+  data = train_std %>% select(-id),
+  method = "knn",
+  # tune parameters using 5-fold cross-validation
+  trControl = trainControl(method = "cv", number = 5),
+  # tuning parameter: the number of nearest neighbors, k
+  tuneGrid = expand.grid(k = seq(1, 50, by = 1))
+)
+```
+
+```{r, knn-model-1-viz}
+knn_small_k <- ggplot(
+    knn_small$results,
+    aes(x = k, y = RMSE)
+  ) +
+  geom_line() +
+  geom_point(aes(color = (k == knn_small[["bestTune"]][["k"]])), size = 1) +
+  labs(
+    x = ""
+  ) +
+  coord_cartesian(ylim = c(80, 180)) +
+  scale_color_manual(values = c("#314f4f", "#e64173")) +
+  theme(legend.position = "none")
+```
+
+```{r, knn-model-1-predict}
+# make vector of predictions
+knn_small_pred <- knn_small %>% predict(newdata = test_std)
+
+# make dataframe to compare with actual values
+knn_small_df <- data.frame(
+  id = test_std %>% select(id),
+  radiation = data_std %>% 
+    filter(id %in% test_rows) %>% 
+    select(radiation),
+  pred = knn_small_pred
+)
+```
+
+```{r, knn-model-2}
+# set new seed for this code chunk
+set.seed(71931)
+
+# KNN model with only time, is_daytime, and temperature
+knn_large <- train(
+  # the model: predict radiation based on all other variables
+  radiation ~ .,
+  data = train_std %>% select(-id),
+  method = "knn",
+  # tune parameters using 5-fold cross-validation
+  trControl = trainControl(method = "cv", number = 5),
+  # tuning parameter: the number of nearest neighbors, k
+  tuneGrid = expand.grid(k = seq(1, 50, by = 1))
+)
+```
+
+```{r, knn-model-2-viz}
+knn_large_k <- ggplot(
+    knn_large$results,
+    aes(x = k, y = RMSE)
+  ) +
+  geom_line() +
+  geom_point(aes(color = (k == knn_large[["bestTune"]][["k"]])), size = 1) +
+  labs(
+    x = "k (Number of Neighbors)"
+  ) +
+  coord_cartesian(ylim = c(80, 180)) +
+  scale_color_manual(values = c("#314f4f", "#e64173")) +
+  theme(legend.position = "none")
+```
+
+```{r, knn-model-2-predict}
+# make vector of predictions
+knn_large_pred <- knn_large %>% predict(newdata = test_std)
+
+# make dataframe to compare with actual values
+knn_large_df <- data.frame(
+  id = test_std %>% select(id),
+  radiation = data_std %>% 
+    filter(id %in% test_rows) %>% 
+    select(radiation),
+  pred = knn_large_pred
+)
+```
+
+```{r, knn-model-3-viz}
+knn_med_k <- ggplot(
+    knn_med$results,
+    aes(x = k, y = RMSE)
+  ) +
+  geom_line() +
+  geom_point(aes(color = (k == knn_med[["bestTune"]][["k"]])), size = 1) +
+  labs(
+    #title = "KNN Medium: Tuning k (Number of Neighbors)",
+    #subtitle = "Using 5-fold CV to minimize RMSE",
+    x = ""
+  ) +
+  coord_cartesian(ylim = c(80, 180)) +
+  scale_color_manual(values = c("#314f4f", "#e64173")) +
+  theme(legend.position = "none")
+```
+
+```{r, knn-model-3-predict}
+# make vector of predictions
+knn_med_pred <- knn_med %>% predict(newdata = test_std)
+
+# make dataframe to compare with actual values
+knn_med_df <- data.frame(
+  id = test_std %>% select(id),
+  radiation = data_std %>% 
+    filter(id %in% test_rows) %>% 
+    select(radiation),
+  pred = knn_med_pred
+)
+
+```
+
+.pull-right[
+```{r, show-knn, fig.width = 3, cache = FALSE}
+plot_grid(knn_small_k, knn_med_k, knn_large_k, nrow = 3)
+```
+]
+
+---
+name: prediction-models-trees-1
+## Tree-based models
+
+How they work:
+* Trees: at each step, find the best way to split the data (greedy algorithm)
+* Forests: combine many individual trees
+  * Create $B$ bootstrapped samples
+  * Train a tree on each sample, and at each split, only consider $m$ variables
+  * Aggregate across bootstrapped trees to get final model
+  
+Parameters to tune:
+* `cp`: complexity parameter used for pruning
+* `mtry`: number of variables to consider at each split
+* `min.node.size`: the smallest number of observations allowed in a node
+
+Expected performance:
+* Single tree: probably better than elasticnet, not sure how it will compare to KNN
+* Forest: better than any single tree, likely better than KNN
+
+---
+name: prediction-models-single-tree
+## Training individual tree models
+
+.pull-left[
+```{r, tree-model-2, echo = TRUE}
+set.seed(64395)
+
+tree_small <- train(
+  # use only is_daytime and temp as predictors
+  radiation ~ .,
+  data = train %>% 
+    select(is_daytime, temperature, radiation),
+  
+  method = "rpart",
+  
+  # tune cp using 5-fold cross-validation
+  trControl = trainControl("cv", number = 5),
+  tuneGrid = data.frame(cp = seq(0.01, 0.2, by = 0.01))
+)
+```
+]
+
+.pull-right[
+```{r, tree-model-2-viz, fig.width = 3}
+ggplot(
+  data = tree_small$results,
+  aes(x = cp, y = RMSE)
+) +
+  geom_line() +
+  geom_point(aes(color = (cp == tree_small[["bestTune"]][["cp"]]))) +
+  labs(
+    title = "Decision Tree: Tuning cp (Complexity Parameter)",
+    subtitle = "Using 5-fold CV to minimize RMSE",
+    x = "cp (Complexity Parameter)"
+  ) +
+  scale_color_manual(values = c("#314f4f", "#e64173")) +
+  theme(legend.position = "none")
+```
+]
+
+```{r, tree-model-2-predict}
+# Make predictions on test set
+tree_small_pred = tree_small %>% predict(newdata = test)
+
+# The results
+tree_small_df <- data.frame(
+  id = test %>% select(id),
+  radiation = data %>% 
+    filter(id %in% test_rows) %>% 
+    select(radiation),
+  pred = tree_small_pred
+)
+```
+
+```{r, tree-model}
+set.seed(64395)
+
+tree <- train(
+  radiation ~ .,
+  data = train %>% select(-id),
+  method = "rpart",
+  trControl = trainControl(method = "cv", number = 5),
+  tuneGrid = data.frame(cp = seq(0, 0.2, by = 0.01))
+)
+```
+
+```{r, tree-model-predict}
+# Make predictions on test set
+tree_pred = tree %>% predict(newdata = test)
+
+# The results
+tree_df <- data.frame(
+  id = test %>% select(id),
+  radiation = data %>% 
+    filter(id %in% test_rows) %>% 
+    select(radiation),
+  pred = tree_pred
+)
+```
+
+---
+name: prediction-models-tree-diagram
+## What does the tree look like?
+
+```{r, tree-model-viz-2}
+rpart.plot(
+  x = tree_small$finalModel,
+  type = 4,
+  extra = "auto",
+  box.palette = "Oranges",
+  branch.lty = 3,
+  shadow.col = "gray",
+  nn = TRUE,
+  digits = 3
+)
+```
+---
+name: prediction-models-forest
+## Training a random forest
+
+.pull-left[
+```{r, forest-model, echo = TRUE}
+# set a new seed for this chunk
+set.seed(42712)
+
+# random forest model
+forest = train(
+  # The model: predict radiation based on everything else
+  radiation ~ .,
+  # The data: non-standardized
+  data = train %>% select(-id),
+  # Implement random forest with 100 trees
+  method = "ranger",
+  num.trees = 100,
+  # Evaluate performance with out-of-bag error estimation
+  trControl = trainControl(method = "oob"),
+  # Tuning parameters
+  tuneGrid = expand.grid(
+    "mtry" = c(1, 2, 3, 4, 5, 6, 7, 8),
+    "splitrule" = "variance",
+    "min.node.size" = 1:10
+  )
+)
+```
+]
+
+.pull-right[
+```{r, forest-model-viz, fig.width = 3}
+forest_tile <- ggplot(
+    data = forest$results,
+    aes(x = mtry, y = min.node.size)
+  ) +
+  geom_tile(aes(fill = RMSE)) +
+  labs(
+    title = "Random Forest: Tuning mtry and min.node.size",
+    subtitle = "Using OOB to minimize RMSE"
+  ) +
+  scale_fill_viridis(option = "plasma", begin = 0, end = 1)
+
+forest_tile
+```
+]
+
+```{r, forest-model-predict}
+# Make predictions on test set
+forest_pred = forest %>% predict(newdata = test)
+
+# The results
+forest_df <- data.frame(
+  id = test %>% select(id),
+  radiation = data %>% 
+    filter(id %in% test_rows) %>% 
+    select(radiation),
+  pred = forest_pred
+)
+```
+---
+layout: true
+# Results
+
+---
+class: inverse, middle
+---
+name: results-model-performances
+## How well did the models perform on data they have never seen?
+
+```{r, evaluation}
+# Define a function that takes in our results dataframes and returns test RMSE
+rmse <- function(df){
+    (df$radiation - df$pred)^2 %>% mean() %>% sqrt()
+}
+
+# Find the RMSE for each model
+all_data <- data.frame(
+  model_name = c(
+    "a_elasticnet",
+    "b_knn_small",
+    "c_knn_med",
+    "d_knn_large",
+    "e_tree_small",
+    "f_tree",
+    "g_forest"),
+  rmse_vals = c(
+    rmse(elasticnet_df),
+    rmse(knn_small_df),
+    rmse(knn_med_df),
+    rmse(knn_large_df),
+    rmse(tree_small_df),
+    rmse(tree_df),
+    rmse(forest_df)
+  )
+)
+```
+
+```{r, evaluation-viz}
+ggplot(all_data, aes(x = model_name, y = rmse_vals)) +
+  geom_col(aes(fill = rmse_vals)) +
+  geom_text(aes(label = round(rmse_vals, 4)), vjust = -0.5) +
+  labs(
+    title = "Test RMSE Values for Our Models",
+    x = "Model Name",
+    y = "Test RMSE",
+    fill = "Test RMSE"
+  ) +
+  scale_x_discrete(
+    labels = c(
+      "Elasticnet",
+      "KNN Small",
+      "KNN Medium",
+      "KNN Large",
+      "Simple Tree",
+      "Tree",
+      "Forest"
+    )
+  ) +
+  scale_fill_viridis(
+    discrete = FALSE,
+  ) +
+  coord_cartesian(ylim = c(0, 200))
+
+```
+
+---
+name: conclusion
+## Conclusions
+
+* As expected, the best model was the random forest and the worst was the elasticnet
+* The standard deviation of radiation values in the data was `r round(sd(data$radiation), 2)` watts per square meter, and our best model had a test RMSE of `r round(rmse(forest_df), 2)` watts per square meter, about 1/4 of the standard deviation
+* So our model predictions were pretty good, but not perfect
+

@@ -1,0 +1,1019 @@
+---
+title: "Predicting Solar Radiation (Sunlight) from Weather Variables"
+subtitle: "Data from NASA via Kaggle user Andrey (dronio)"
+author: "Natalie Weaver"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: html_notebook
+---
+
+## Document Setup
+
+Everything we need to make this file run properly.
+
+```{r, setup}
+# load packages
+library(pacman)
+p_load(tidyverse, magrittr, janitor, DT, lubridate, viridis, knitr, cowplot, caret, rpart, rpart.plot)
+
+# knitr options
+opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  echo = TRUE,
+  eval = TRUE,
+  fig.align = "center",
+  dpi = 500)
+
+options(knitr.table.format = "html")
+
+# text size for ggplots
+font_size <- 40
+```
+
+## The Question
+
+Can we predict the level of solar radiation (amount of sunlight) using other meteorological features?
+
+## The Data
+
+### Background information
+
+This dataset originally comes from NASA for a hackathon challenge. I downloaded it as a csv from [Kaggle](https://www.kaggle.com/dronio/SolarEnergy), where it was uploaded by a user named [Andrey](https://www.kaggle.com/dronio) in 2017.
+
+The file contains meteorological data collected by the weather station in the [HI-SEAS](https://hi-seas.org/) habitat on the Big Island of Hawaii. HI-SEAS is a Mars analog habitat operated by the University of Hawaii; it has been used by NASA for research into human behavior in conditions simulating a long-term mission to Mars. This data was collected from September through December of 2016, between Mission IV and Mission V.
+
+The variables in this dataset are the following:
+
+* `UNIXTime`: the date/time of the measurement in UNIX time (the number of seconds since January 1st, 1970)
+* `Data`: the date of the measurement, formatted mm/dd/yyyy (should be called `date`, will change)
+* `Time`: the time of the measurement, formatted hh:mm:ss
+* `Radiation`: the solar radiation (amount of sunlight) in watts per square meter
+* `Temperature`: the temperature in degrees Fahrenheit
+* `Pressure`: the barometric pressure in inches Hg
+* `Humidity`: the humidity as a percentage
+* `WindDirection(Degrees)`: the direction from which the wind blows, in degrees from North going clockwise (e.g. a wind coming from due East would have a 90 degree angle)
+* `Speed`: the wind speed in miles per hour
+* `TimeSunRise`: the local time of the sunrise, formatted hh:mm:ss
+* `TimeSunSet`: the local time of the sunset, formatted hh:mm:ss
+
+### Exploratory Analysis
+
+Let's read in the data and see the column specifications, head, and number of missing values.
+
+```{r, load-data}
+# read in the data using read_csv from readr in the tidyverse
+# reformat the names using clean_names from janitor
+data <- read_csv("SolarPrediction.csv") %>% clean_names() %>%
+  rename(date = data) # rename data column to date
+
+# get column specs (metadata created by read_csv)
+data %>% spec()
+
+# see the head of the data
+data %>% head()
+
+# are there any missing values?
+data %>% is.na() %>% colSums() %>% as.data.frame()
+```
+We got lucky with this dataset that there are no missing values.
+
+Let's make some visualizations to better understand the shape of the data. Here are some histograms showing the distributions of various features in our data.
+
+```{r, visualize-data, fig.height = 7}
+radiation_hist <- ggplot(data = data, aes(x = radiation)) +
+  geom_histogram(fill = "#440154FF") +
+  labs(
+    title = "Distribution of Radiation Values",
+    x = "Radiation (watts per square meter)"
+  ) +
+  theme(text = element_text(size = font_size))
+
+temperature_hist <- ggplot(data = data, aes(x = temperature)) +
+  geom_histogram(fill = "#404788FF") +
+  scale_x_continuous(labels = function(x) paste0(x, "°")) +
+  labs(
+    title = "Distribution of Temperature Values",
+    x = "Temperature (degrees Fahrenheit)"
+  ) +
+  theme(text = element_text(size = font_size))
+
+pressure_hist <- ggplot(data = data, aes(x = pressure)) +
+  geom_histogram(fill = "#287D8EFF") +
+  labs(
+    title = "Distribution of Pressure Values",
+    x = "Pressure (inches of Hg)"
+  ) +
+  theme(text = element_text(size = font_size))
+
+humidity_hist <- ggplot(data = data, aes(x = humidity)) +
+  geom_histogram(fill = "#29AF7FFF") +
+  scale_x_continuous(labels = function(x) paste0(x, "%")) +
+  labs(
+    title = "Distribution of Humidity Values",
+    x = "Humidity (percentage)"
+  ) +
+  theme(text = element_text(size = font_size))
+
+direction_hist <- ggplot(data = data, aes(x = wind_direction_degrees)) +
+  geom_histogram(fill = "#95D840FF") +
+  scale_x_continuous(labels = function(x) paste0(x, "°")) +
+  labs(
+    title = "Distribution of Wind Direction Values",
+    x = "Wind Direction (degrees clockwise from North)"
+  ) +
+  theme(text = element_text(size = font_size))
+
+speed_hist <- ggplot(data = data, aes(x = speed)) +
+  geom_histogram(fill = "#95D840FF") +
+  labs(
+    title = "Distribution of Wind Speed Values",
+    x = "Wind Speed (miles per hour)"
+  ) +
+  theme(text = element_text(size = font_size))
+
+rise_hist <- ggplot(data = data, aes(x = time_sun_rise)) +
+  geom_histogram(bins = 15, fill = "#FDE725FF") +
+  labs(
+    title = "Distributions of Sunrise Times",
+    x = "Hawaii Local Time"
+  ) +
+  theme(text = element_text(size = font_size))
+
+set_hist <- ggplot(data = data, aes(x = time_sun_set)) +
+  geom_histogram(bins = 15, fill = "#FDE725FF") +
+  labs(
+    title = "Distributions of Sunset Times",
+    x = "Hawaii Local Time"
+  ) +
+  theme(text = element_text(size = font_size))
+
+plot_grid(radiation_hist, temperature_hist, pressure_hist, humidity_hist, direction_hist, speed_hist, rise_hist, set_hist, ncol = 2)
+```
+From these histograms we make the following observations:
+
+* Many values of `radiation` are either 0 or close to 0. These were probably observations taken at night. Using the `time`, `time_sun_rise`, and `time_sun_set` variables, we can make a new feature identifying whether an observation took place during the day or at night so our models will be able to separate out these values better.
+* The `temperature`, `pressure`, and wind `speed` variables all seem to be roughly normally distributed. It appears that `pressure` is slightly skewed to the left, while `temperature` and wind `speed` are skewed to the right. I have no idea why the atmospheric pressure would be left-skewed, but this might have something to do with the local geography. The right skews on the temperature and wind speed make sense. Hawaii doesn't get very cold, but occasional heat waves could cause high temperatures. Wind speed can't go below 0, but it could be arbitrarily high (e.g. during a storm). 
+* The `humidity` is heavily skewed towards 100%. That makes sense for Hawaii.
+* The `wind-direction-degrees` histogram is difficult to interpret. The wind's direction is a continuous measure, but it doesn't make sense to record it as an angle clockwise from North. A NNE wind and a NNW wind come from practically the same direction, yet their degree measurements are very far apart: something like 30 degrees for NNE and 330 degrees for NNW. We will solve this problem by converting the wind direction to a factor variable with the levels North, East, South, and West, where each level covers 90 degrees of the circle, centered on the cardinal directions. There are other ways to solve this problem, but this solution is nice because it is simple to implement and easy to interpret.
+
+
+### Data cleaning and feature engineering
+
+#### Dealing with missing values
+
+With this particular dataset, we got lucky that there were absolutely no missing values. Often, the data will have some `NA`s that we will have to deal with. Here's how we could deal with that in general:
+
+* Look for `NA`s that mean something other than a lack of data, and replace them appropriately. Sometimes it might make sense to replace an `NA` in a numerical column with `0`, or to replace an `NA` in a character column with `"None"`.
+* Impute missing numerical values using `method = "medianImpute"` in the `preProcess` function from the `caret` package. This will replace all `NA`s with the median of the existing values in their column.
+* Impute missing categorical values by replacing `NA`s with the mode of the non-`NA` values in their column. Unfortunately, `preProcess` doesn't have such a method out of the box, so we would have to find another package that does this or write a function to do it ourselves.
+* Alternatively, we could impute missing numerical and categorical variables using `method = "knnImpute"` in `preProcess`. This will replace the `NA`s with k-nearest neighbors predictions based on the rows that do not have `NA`s.
+
+```{r, impute-missing, eval = FALSE}
+# we were lucky to actually have no missing data
+# but if we did, here's how we could medianImpute
+data_clean <- data %>% preProcess(method = "medianImpute") %>%
+  predict(newdata = data)
+```
+
+#### Feature engineering
+
+In the previous section, we observed that we might benefit from creating a couple new variables. Let's do that now.
+
+* `is_daytime` will be `0` if an observation occurred after sunrise and before sunset (the daytime) and `1` otherwise (the night).
+* `wind_direction_factor` will be `"north"` if the wind angle was within 45 degrees of due North, `"east"` if within 45 degrees of due East, etc.
+
+```{r, feature-engineering}
+# create is_daytime boolean variable
+data <- data %>% mutate(
+  is_daytime = as.numeric((time > time_sun_rise) & (time < time_sun_set))
+)
+
+# create wind direction factor variable
+data <- data %>% mutate(
+  wind_direction_factor = case_when(
+    wind_direction_degrees <= 45 ~ "north",
+    wind_direction_degrees <= 135 ~ "east",
+    wind_direction_degrees <= 225 ~ "south",
+    wind_direction_degrees <= 315 ~ "west",
+    wind_direction_degrees > 315 ~ "north"
+  )
+)
+```
+
+### A few more visualizations
+
+Let's make a few more visuals based on our above observations, using our new features.
+
+#### Radiation during the day and night
+
+What is the daytime distribution of radiation? What is the nighttime distribution? Were we right in guessing that most of the near-0 values were observations occurring at night?
+
+```{r, visualize-radiation}
+# distribution of radiation values during the daytime
+rad_day_hist <- ggplot(data = data %>% filter(is_daytime == 1), aes(x = radiation)) +
+  geom_histogram(fill = "#F68F46FF") +
+  labs(
+    title = "Daytime Radiation",
+    x = "Radiation (watts per square meter)"
+  ) 
+
+# distribution of radiation values during the night
+rad_night_hist <- ggplot(data = data %>% filter(is_daytime == 0), aes(x = radiation)) +
+  geom_histogram(fill = "#403891FF") +
+  labs(
+    title = "Nighttime Radiation",
+    x = "Radiation (watts per square meter)"
+  )
+
+# distribution of daytime and nighttime radiation values on same plot
+rad_group_hist <- ggplot(data = data, aes(x = radiation, group = factor(is_daytime))) +
+  geom_histogram(
+    position = "identity", 
+    aes(fill = factor(is_daytime), color = factor(is_daytime)), 
+    alpha = 0.6) +
+  labs(
+    title = "Radiation Grouped by Day/Night",
+    x = "Radiation (watts per square meter)",
+    fill = "",
+    color = ""
+  ) +
+  scale_fill_viridis(discrete = TRUE, labels = c("Night", "Day"), option = "magma", begin = 0.2, end = 0.8) +
+  scale_color_viridis(discrete = TRUE, labels = c("Night", "Day"), option = "magma", begin = 0.2, end = 0.8)
+
+# distribution of radiation, colored by day/night
+rad_fill_hist <- ggplot(data = data, aes(x = radiation)) +
+  geom_histogram(aes(fill = factor(is_daytime))) +
+  labs(
+    title = "Radiation Filled by Day/Night",
+    x = "Radiation (watts per square meter)",
+    fill = ""
+  ) +
+  scale_fill_viridis(discrete = TRUE, labels = c("Night", "Day"), option = "magma", begin = 0.2, end = 0.8)
+
+# show the plots
+plot_grid(rad_day_hist, rad_night_hist, ncol = 2)
+plot_grid(rad_group_hist, rad_fill_hist, nrow = 2)
+```
+Observations:
+
+* Our assumption that most of the near-0 values for radiation occurred at night appears to be correct.
+* There were still many near-0 values from the daytime. These values were likely observed at dawn or dusk when the daylight is not very bright, or on especially cloudy or stormy days when much of the sunlight gets blocked.
+* There were some low non-zero values from the night. These values were likely observed at dawn or dusk when the night was just ending or starting, so there was still sunlight coming over the horizon. Or maybe if the moon is very bright, it will cause a small amount of observable solar radiation.
+
+One more visual to track these observations:
+
+```{r, visualize-radiation-2}
+# scatterplot of radiation vs local time
+ggplot(data = data, aes(x = time, y = radiation)) +
+  geom_point(aes(color = factor(is_daytime)), alpha = 0.2) +
+  labs(
+    title = "Solar Radiation vs. Time of Day",
+    x = "Hawaii Local Time",
+    y = "Radiation (watts per square meter)",
+    color = ""
+  ) +
+  scale_color_viridis(discrete = TRUE, labels = c("Night", "Day"), option = "magma", begin = 0.2, end = 0.8)
+```
+Looks like everything checks out. Because of the sharp turns in the data, it might be useful to fit a piecewise model like a spline.
+
+#### Wind from the North, East, South, and West
+
+In how many observations did the wind come from the North, East, South, and West? How did the average speed for each cardinal direction compare? What does the histogram of wind speeds look like when colored by direction?
+
+```{r, visualize-wind}
+# bar chart of number of observations of wind from each direction
+wind_count_bar <- ggplot(data = data, aes(x = wind_direction_factor)) +
+  geom_bar(stat = "count", aes(fill = wind_direction_factor)) +
+  labs(
+    title = "Count of Wind Oberservations for Each Cardinal Direction",
+    x = "Wind Direction",
+    y = "Number of Observations",
+    fill = "Direction"
+  ) +
+  geom_text(aes(label = ..count..), stat = "count", vjust = -0.5, size = 3) +
+  coord_cartesian(ylim = c(0, 16000)) +
+  scale_fill_viridis(discrete = TRUE)
+
+# bar chart of average speed of wind from each direction
+wind_speed_bar <- ggplot(data = data, aes(x = wind_direction_factor, y = speed)) +
+  geom_bar(stat = "summary", fun.y = "mean", aes(fill = wind_direction_factor)) +
+  labs(
+    title = "Average Wind Speed for Each Cardinal Direction",
+    x = "Wind Direction",
+    y = "Mean Wind Speed (mph)",
+    fill = "Direction"
+  ) +
+  geom_text(aes(label = round(..y.., 4)), stat = "summary", fun.y = "mean", vjust = -0.5, size = 3) +
+  coord_cartesian(ylim = c(0, 8)) +
+  scale_fill_viridis(discrete = TRUE) 
+
+# distribution of speed for eastern winds
+speed_east_hist <- ggplot(
+    data = data %>% filter(wind_direction_factor == "east"),
+    aes(x = speed)) +
+  geom_histogram(fill = "#440154FF", binwidth = 1.35) +
+  labs(
+    title = "Eastern Winds",
+    x = "Wind Speed (miles per hour)"
+  )
+
+# distribution of speed for northern winds
+speed_north_hist <- ggplot(
+    data = data %>% filter(wind_direction_factor == "north"),
+    aes(x = speed)) +
+  geom_histogram(fill = "#33638DFF", binwidth = 1.35) +
+  labs(
+    title = "Northern Winds",
+    x = "Wind Speed (mph)"
+  )
+
+# distribution of speed for southern winds
+speed_south_hist <- ggplot(
+    data = data %>% filter(wind_direction_factor == "south"),
+    aes(x = speed)) +
+  geom_histogram(fill = "#3CBB75FF", binwidth = 1.35) +
+  labs(
+    title = "Southern Winds",
+    x = "Wind Speed (mph)"
+  )
+
+# distribution of speed for western winds
+speed_west_hist <- ggplot(
+    data = data %>% filter(wind_direction_factor == "west"),
+    aes(x = speed)) +
+  geom_histogram(fill = "#FDE725FF", binwidth = 1.35) +
+  labs(
+    title = "Western Winds",
+    x = "Wind Speed (mph)"
+  )
+
+# distribution of eastern, northern, southern, and western wind speed on same plot
+speed_group_hist <- ggplot(data = data, aes(x = speed, group = wind_direction_factor)) +
+  geom_histogram(
+    position = "identity", 
+    aes(fill = wind_direction_factor, color = wind_direction_factor), 
+    alpha = 0.4) +
+  labs(
+    title = "Wind Speed Grouped by Direction",
+    x = "Wind Speed (mph)", 
+    fill = "Direction",
+    color = "Direction"
+  ) +
+  scale_fill_viridis(discrete = TRUE) +
+  scale_color_viridis(discrete = TRUE)
+
+# distribution of wind speed, colored by direction
+speed_fill_hist <- ggplot(data = data, aes(x = speed)) +
+  geom_histogram(aes(fill = wind_direction_factor)) +
+  labs(
+    title = "Wind Speed Filled by Direction",
+    x = "Wind Speed (mph)",
+    fill = "Direction"
+  ) +
+  scale_fill_viridis(discrete = TRUE)
+
+# show the plots
+plot_grid(wind_count_bar, wind_speed_bar, nrow = 2)
+plot_grid(speed_east_hist, speed_north_hist, speed_south_hist, speed_west_hist, ncol = 2)
+plot_grid(speed_group_hist, speed_fill_hist, nrow = 2)
+```
+
+Observations:
+
+* The most common wind direction was South, and the least common was West.
+* Western winds had the highest average speed, just slightly higher than the average speed for Southern winds. We don't know if any of the differences in means are statistically significant.
+* The speeds for each direction appear to be approximately normally distributed. This means we could figure out whether the differences between the mean speeds are statistically significant by doing a two-sample T test on each pair of directions (but multiple tests increase the probability of a false positive). Alternatively, we could do an ANOVA test on all four directions (but if there is a significant difference between a pair of means, we won't know which pair).
+
+#### Atmospheric pressure, temperature, and humidity
+
+Is there a relationship between atmospheric pressure and temperature? What about between pressure and humidity?
+
+```{r, visualize-pressure}
+# scatterplot and simple regression of pressure vs temperature, colored by humidity
+press_vs_temp <- ggplot(data = data, aes(x = temperature, y = pressure)) +
+  geom_point(aes(color = humidity), alpha = 0.2) +
+  geom_smooth(method = "lm", color = "black") +
+  labs(
+    title = "Atmospheric Pressure vs. Temperature",
+    x = "Temperature (Fahrenheit)",
+    y = "Pressure (inHg)"
+  ) +
+  scale_x_continuous(labels = function(x) paste0(x, "°")) +
+  scale_color_viridis(option = "plasma", begin = 0.5, end = 1)
+
+# scatterplot and simple regression of pressure vs humidity, colored by temperature
+press_vs_hum <- ggplot(data = data, aes(x = humidity, y = pressure)) +
+  geom_point(aes(color = temperature), alpha = 0.2) +
+  geom_smooth(method = "lm", color = "black") +
+  labs(
+    title = "Atmospheric Pressure vs. Humidity",
+    x = "Humidity",
+    y = "Pressure (inHg)"
+  ) +
+  scale_x_continuous(labels = function(x) paste0(x, "%")) +
+  scale_color_viridis(option = "plasma")
+
+# tiling of pressure on temperature-humidity grid
+press_tile <- ggplot(
+    data = data %>% group_by(temperature, humidity) %>% summarize(mean_pressure = mean(pressure)),
+    aes(x = temperature, y = humidity)
+  ) +
+  geom_tile(aes(fill = mean_pressure)) +
+  labs(
+    title = "Pressure Tiling on Temperature and Humidity",
+    x = "Temperature (Fahrenheit)",
+    y = "Humidity",
+    fill = "Mean Pressure"
+  ) +
+  scale_x_continuous(labels = function(x) paste0(x, "°")) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  scale_fill_viridis()
+
+# show the plots
+plot_grid(press_vs_temp, press_vs_hum, nrow = 2)
+press_tile
+```
+Observations:
+
+* There is a slight positive correlation between pressure and temperature. Even though the measurements are not from a closed system, this seems reasonable because the ideal gas law says $PV = nRT$, where $P$ is pressure and $T$ is temperature. As gas particles gain heat energy, their temperature increases and so does their speed. This makes the particles collide with things more frequently and faster, which we observe as increased pressure.
+* There is a slight negative correlation between pressure and humidity. This makes sense because water vapor is less dense than dry air. When the amount of moisture in the air increases, the humidity increases and the density and pressure decrease.
+* From the pressure tiling, it appears that in general lower pressures are associated with lower temperatures and higher humidities, while higher pressures are associated with higher temperatures and lower humidities. This tracks with our previous two observations.
+* Obviously, we should **not** interpret the effects of temperature and humidity on pressure as causal. Weather systems are very complicated, so there are certainly variables not observed in our data that affect pressure, temperature, and humidity. Since we have not controlled for all confounders (and are not able to with this data), we cannot assume conditional independence. Thus, we cannot interpret the correlation as causal.
+
+## Prediction models
+
+We will try to predict the level of solar radiation from the other variables using three machine learning methods:
+
+* K-Nearest Neighbors
+* Elasticnet
+* Random Forest.
+
+Then we will evaluate the three models using the test RMSE (root mean squared error) to see which model did the best.
+
+### Prepare data for model fitting
+
+Before we can fit these models, we need to prepare the data.
+
+* We will add an `id` column to number the rows, which will make them easy to keep track of.
+* We already commented that `wind_direction_degrees` is a nonsensical/arbitrary way to measure wind direction, and similarly, `unix_time` is a nonsensical/arbitrary way to measure time. We won't use these variables in our models, so we can go ahead and drop them.
+* R will interpret the data in `date` as categorical by default (because it is given as a character type), so we need to force it to numeric by reformatting the string and then calling the `lubridate` function `mdy()`. We also need to convert all dates and times to doubles so they can be standardized in `preProcess`.
+* A random forest can use the data as-is, but KNN and elasticnet require the numerical predictors to be standardized (centered and scaled) and the categorical predictors to be converted to dummies. We will create a standardized version of the data for these models, and keep the original version for the random forest.
+* We will hold out 20% of the data to evaluate model performance on unseen data at the very end.
+
+```{r, adjust-columns}
+# create an id column
+data <- data %>% mutate(id = row_number()) %>% relocate(id)
+
+# drop unix_time and wind_direction_degrees
+data <- data %>% select(-unix_time, -wind_direction_degrees)
+
+# reformat the date
+data <- data %>% mutate(date = str_replace(date, " 12:00:00 AM", "")) %>% 
+  mutate(date = mdy(date))
+
+# convert all dates and times to doubles
+data <- data %>% mutate(
+  date = as.numeric(date),
+  time = as.numeric(time),
+  time_sun_rise = as.numeric(time_sun_rise),
+  time_sun_set = as.numeric(time_sun_set)
+)
+```
+
+```{r, standardize-data}
+# create dummy variables
+data_dummy <- dummyVars(
+    radiation ~ .,
+    data = data %>% select(-id),
+    fullRank = TRUE
+  ) %>% 
+  predict(newdata = data) %>% 
+  as.data.frame()
+
+# standardize the non-boolean variables
+# also don't standardize the id and outcome
+data_std <- preProcess(
+    x = data %>% select(-is_daytime, -id, -radiation),
+    method = c("center", "scale")
+  ) %>% 
+  predict(newdata = data_dummy) %>% 
+  as.data.frame()
+
+# add back in the id and radiation columns
+# which we took out in the processing of dummying and standardizing
+data_std %<>% mutate(
+    id = data$id,
+    radiation = data$radiation
+  ) %>%
+  relocate(id)
+```
+
+```{r, split-data}
+# set seed
+set.seed(46848)
+
+# randomly select 20% of the data to be used for testing
+test_rows <- sample(
+    x = data$id,
+    size = nrow(data) * 0.2,
+    replace = FALSE
+  ) %>% as.numeric()
+
+# split regular data
+train <- data %>% filter(!id %in% test_rows)
+test <- data %>% filter(id %in% test_rows) %>% select(-radiation)
+
+# split standardized data
+train_std <- data_std %>% filter(!id %in% test_rows)
+test_std <- data_std %>% filter(id %in% test_rows) %>% select(-radiation)
+```
+
+### K-Nearest Neighbors
+
+Explanation of KNN.
+
+#### KNN Model 1: time, is_daytime, temperature
+
+```{r, knn-model-1}
+# set new seed for this code chunk
+set.seed(98329)
+
+# KNN model with only time, is_daytime, and temperature
+knn_small <- train(
+  # the model: predict radiation based on time, is_daytime and temperature
+  radiation ~ time + is_daytime + temperature,
+  data = train_std %>% select(-id),
+  method = "knn",
+  # tune parameters using 5-fold cross-validation
+  trControl = trainControl(method = "cv", number = 5),
+  # tuning parameter: the number of nearest neighbors, k
+  tuneGrid = expand.grid(k = seq(1, 50, by = 1))
+)
+```
+
+```{r, knn-model-1-viz}
+knn_small_k <- ggplot(
+    knn_small$results,
+    aes(x = k, y = RMSE)
+  ) +
+  geom_line() +
+  geom_point(aes(color = (k == knn_small[["bestTune"]][["k"]])), size = 2) +
+  labs(
+    title = "KNN Small: Tuning k (Number of Neighbors)",
+    subtitle = "Using 5-fold CV to minimize RMSE",
+    x = "k (Number of Neighbors)"
+  ) +
+  coord_cartesian(ylim = c(80, 180)) +
+  scale_color_manual(values = c("#314f4f", "#e64173")) +
+  theme(legend.position = "none")
+
+knn_small_k
+```
+
+```{r, knn-model-1-predict}
+# make vector of predictions
+knn_small_pred <- knn_small %>% predict(newdata = test_std)
+
+# make dataframe to compare with actual values
+knn_small_df <- data.frame(
+  id = test_std %>% select(id),
+  radiation = data_std %>% 
+    filter(id %in% test_rows) %>% 
+    select(radiation),
+  pred = knn_small_pred
+)
+
+head(knn_small_df)
+```
+
+#### KNN Model 2: all predictors
+
+```{r, knn-model-2}
+# set new seed for this code chunk
+set.seed(71931)
+
+# KNN model with only time, is_daytime, and temperature
+knn_large <- train(
+  # the model: predict radiation based on all other variables
+  radiation ~ .,
+  data = train_std %>% select(-id),
+  method = "knn",
+  # tune parameters using 5-fold cross-validation
+  trControl = trainControl(method = "cv", number = 5),
+  # tuning parameter: the number of nearest neighbors, k
+  tuneGrid = expand.grid(k = seq(1, 50, by = 1))
+)
+```
+
+```{r, knn-model-2-viz}
+knn_large_k <- ggplot(
+    knn_large$results,
+    aes(x = k, y = RMSE)
+  ) +
+  geom_line() +
+  geom_point(aes(color = (k == knn_large[["bestTune"]][["k"]])), size = 2) +
+  labs(
+    title = "KNN Large: Tuning k (Number of Neighbors)",
+    subtitle = "Using 5-fold CV to minimize RMSE",
+    x = "k (Number of Neighbors)"
+  ) +
+  coord_cartesian(ylim = c(80, 180)) +
+  scale_color_manual(values = c("#314f4f", "#e64173")) +
+  theme(legend.position = "none")
+
+knn_large_k
+```
+
+```{r, knn-model-2-predict}
+# make vector of predictions
+knn_large_pred <- knn_large %>% predict(newdata = test_std)
+
+# make dataframe to compare with actual values
+knn_large_df <- data.frame(
+  id = test_std %>% select(id),
+  radiation = data_std %>% 
+    filter(id %in% test_rows) %>% 
+    select(radiation),
+  pred = knn_large_pred
+)
+
+head(knn_large_df)
+```
+
+#### KNN Model 3: several variables (but not all)
+
+```{r, knn-model-3}
+# set new seed for this code chunk
+set.seed(86129)
+
+# KNN model with only time, is_daytime, and temperature
+knn_med <- train(
+  # the model: predict radiation based several variables
+  radiation ~ time + is_daytime + temperature + date + pressure + humidity,
+  data = train_std %>% select(-id),
+  method = "knn",
+  # tune parameters using 5-fold cross-validation
+  trControl = trainControl(method = "cv", number = 5),
+  # tuning parameter: the number of nearest neighbors, k
+  tuneGrid = expand.grid(k = seq(1, 50, by = 1))
+)
+```
+
+```{r, knn-model-3-viz}
+knn_med_k <- ggplot(
+    knn_med$results,
+    aes(x = k, y = RMSE)
+  ) +
+  geom_line() +
+  geom_point(aes(color = (k == knn_med[["bestTune"]][["k"]])), size = 2) +
+  labs(
+    title = "KNN Medium: Tuning k (Number of Neighbors)",
+    subtitle = "Using 5-fold CV to minimize RMSE",
+    x = "k (Number of Neighbors)"
+  ) +
+  coord_cartesian(ylim = c(80, 180)) +
+  scale_color_manual(values = c("#314f4f", "#e64173")) +
+  theme(legend.position = "none")
+
+knn_med_k
+```
+
+```{r, knn-model-3-predict}
+# make vector of predictions
+knn_med_pred <- knn_med %>% predict(newdata = test_std)
+
+# make dataframe to compare with actual values
+knn_med_df <- data.frame(
+  id = test_std %>% select(id),
+  radiation = data_std %>% 
+    filter(id %in% test_rows) %>% 
+    select(radiation),
+  pred = knn_med_pred
+)
+
+head(knn_med_df)
+```
+#### KNN Model 4: same as Model 3 but without is_daytime
+
+```{r, knn-model-4}
+# set new seed for this code chunk
+set.seed(38473)
+
+# KNN model with only time, is_daytime, and temperature
+knn_med2 <- train(
+  # the model: predict radiation based on is_daytime and temperature
+  radiation ~ time + temperature + date + pressure + humidity,
+  data = train_std %>% select(-id),
+  method = "knn",
+  # tune parameters using 5-fold cross-validation
+  trControl = trainControl(method = "cv", number = 5),
+  # tuning parameter: the number of nearest neighbors, k
+  tuneGrid = expand.grid(k = seq(1, 50, by = 1))
+)
+```
+
+```{r, knn-model-4-viz}
+knn_med2_k <- ggplot(
+    knn_med2$results,
+    aes(x = k, y = RMSE)
+  ) +
+  geom_line() +
+  geom_point(aes(color = (k == knn_med2[["bestTune"]][["k"]])), size = 2) +
+  labs(
+    title = "KNN Medium 2: Tuning k (Number of Neighbors)",
+    subtitle = "Using 5-fold CV to minimize RMSE",
+    x = "k (Number of Neighbors)"
+  ) +
+  coord_cartesian(ylim = c(80, 180)) +
+  scale_color_manual(values = c("#314f4f", "#e64173")) +
+  theme(legend.position = "none")
+
+knn_med2_k
+```
+
+```{r, knn-model-4-predict}
+# make vector of predictions
+knn_med2_pred <- knn_med2 %>% predict(newdata = test_std)
+
+# make dataframe to compare with actual values
+knn_med2_df <- data.frame(
+  id = test_std %>% select(id),
+  radiation = data_std %>% 
+    filter(id %in% test_rows) %>% 
+    select(radiation),
+  pred = knn_med2_pred
+)
+
+head(knn_med2_df)
+```
+
+```{r, knn-all-viz}
+# see charts for all knn models together
+plot_grid(knn_small_k, knn_large_k, knn_med_k, knn_med2_k, nrow = 2)
+```
+
+### Elasticnet
+
+Explanation of Elasticnet = ridge + lasso.
+
+```{r, elasticnet-model}
+# set a new seed for this chunk
+set.seed(83352)
+
+# set range of lambdas, the size of the penalty
+#lambdas = 10 ^ seq(from = 1, to = -3, length = 1e2)
+lambdas = seq(from = 0, to = 4, by = 0.1)
+
+# set range of alphas, the relative weight on ridge (0) and lasso (1) penalties
+alphas = seq(from = 0, to = 1, by = 0.05)
+
+# elasticnet model
+elasticnet <- train(
+  # the model: regress radiation on all predictors
+  radiation ~ .,
+  data = train_std %>% select(-id),
+  method = "glmnet",
+  # evaluate performance with 5-fold cross validation
+  trControl = trainControl(method = "cv", number = 5),
+  # the tuning parameters: the alphas and lambdas defined above
+  tuneGrid = expand.grid(alpha = alphas, lambda = lambdas)
+)
+
+```
+
+```{r, elasticnet-model-predict}
+# make vector of predictions
+elasticnet_pred <- elasticnet %>% predict(newdata = test_std)
+
+# make dataframe to compare with actual values
+elasticnet_df <- data.frame(
+  id = test_std %>% select(id),
+  radiation = data_std %>% 
+    filter(id %in% test_rows) %>% 
+    select(radiation),
+  pred = elasticnet_pred
+)
+
+head(elasticnet_df)
+```
+
+```{r, elasticnet-model-viz}
+elasticnet_tile <- ggplot(
+    data = elasticnet$results, #%>% filter(alpha > 0),
+    aes(x = alpha, y = lambda)
+  ) +
+  geom_tile(aes(fill = RMSE)) +
+  labs(
+    title = "Elasticnet: Tuning α and λ",
+    subtitle = "Using 5-fold CV to minimize RMSE",
+    x = "α (0 = ridge, 1 = lasso)",
+    y = "λ (shrinkage penalty)"
+  ) +
+  scale_fill_viridis(option = "plasma", begin = 0, end = 1)
+
+elasticnet_tile2 <- ggplot(
+    data = elasticnet$results %>% filter(alpha > 0),
+    aes(x = alpha, y = lambda)
+  ) +
+  geom_tile(aes(fill = RMSE)) +
+  labs(
+    title = "Elasticnet: Tuning α and λ",
+    subtitle = "Using 5-fold CV to minimize RMSE",
+    x = "α (0 = ridge, 1 = lasso)",
+    y = "λ (shrinkage penalty)"
+  ) +
+  scale_fill_viridis(option = "plasma", begin = 0, end = 1)
+
+plot_grid(elasticnet_tile, elasticnet_tile2)
+```
+
+### Tree-based methods
+
+#### Decision tree
+
+```{r, tree-model}
+set.seed(64395)
+
+tree <- train(
+  radiation ~ .,
+  data = train %>% select(-id),
+  method = "rpart",
+  trControl = trainControl(method = "cv", number = 5),
+  tuneGrid = data.frame(cp = seq(0, 0.2, by = 0.01))
+)
+```
+
+```{r, tree-model-predict}
+# Make predictions on test set
+tree_pred = tree %>% predict(newdata = test)
+
+# The results
+tree_df <- data.frame(
+  id = test %>% select(id),
+  radiation = data %>% 
+    filter(id %in% test_rows) %>% 
+    select(radiation),
+  pred = tree_pred
+)
+
+head(tree_df)
+```
+
+```{r, tree-model-viz}
+ggplot(
+  data = tree$results,
+  aes(x = cp, y = RMSE)
+) +
+  geom_line() +
+  geom_point(aes(color = (cp == tree[["bestTune"]][["cp"]]))) +
+  labs(
+    title = "Decision Tree: Tuning cp (Complexity Parameter)",
+    subtitle = "Using 5-fold CV to minimize RMSE",
+    x = "cp (Complexity Parameter)"
+  ) +
+  scale_color_manual(values = c("#314f4f", "#e64173")) +
+  theme(legend.position = "none")
+```
+```{r, tree-model-2}
+set.seed(64395)
+
+tree_small <- train(
+  radiation ~ .,
+  data = train %>% select(is_daytime, temperature, radiation),
+  method = "rpart",
+  trControl = trainControl(method = "cv", number = 5),
+  tuneGrid = data.frame(cp = seq(0.01, 0.2, by = 0.01))
+)
+```
+
+```{r, tree-model-2-predict}
+# Make predictions on test set
+tree_small_pred = tree_small %>% predict(newdata = test)
+
+# The results
+tree_small_df <- data.frame(
+  id = test %>% select(id),
+  radiation = data %>% 
+    filter(id %in% test_rows) %>% 
+    select(radiation),
+  pred = tree_small_pred
+)
+
+head(tree_small_df)
+```
+
+```{r, tree-model-2-viz}
+ggplot(
+  data = tree_small$results,
+  aes(x = cp, y = RMSE)
+) +
+  geom_line() +
+  geom_point(aes(color = (cp == tree_small[["bestTune"]][["cp"]]))) +
+  labs(
+    title = "Decision Tree: Tuning cp (Complexity Parameter)",
+    subtitle = "Using 5-fold CV to minimize RMSE",
+    x = "cp (Complexity Parameter)"
+  ) +
+  scale_color_manual(values = c("#314f4f", "#e64173")) +
+  theme(legend.position = "none")
+```
+
+```{r, tree-model-viz-2}
+rpart.plot(
+  x = tree_small$finalModel,
+  type = 4,
+  extra = "auto",
+  box.palette = "Oranges",
+  branch.lty = 3,
+  shadow.col = "gray",
+  nn = TRUE,
+  digits = 3
+)
+```
+
+#### Random forest
+
+Explanation of Random Forests (how you get them from Random Trees)
+
+```{r, forest-model}
+# set a new seed for this chunk
+set.seed(42712)
+
+# random forest model
+forest = train(
+  # The model: predict radiation based on everything else
+  radiation ~ .,
+  # The data: non-pre-processed train dataframe, without id
+  data = train %>% select(-id),
+  # Use ranger to implement random forest with 100 trees
+  method = "ranger",
+  num.trees = 100,
+  # Evaluate performance with out-of-bag error estimation
+  trControl = trainControl(method = "oob"),
+  # Tuning parameters: 
+    # mtry - number of random predictors at each split,
+    # splitrule - the rule for splitting,
+    # and min.node.size - minimum number of observations per leaf
+  tuneGrid = expand.grid(
+    "mtry" = c(1, 2, 3, 4, 5, 6, 7, 8),
+    "splitrule" = "variance",
+    "min.node.size" = 1:10
+  )
+)
+```
+
+
+```{r, forest-model-predict}
+# Make predictions on test set
+forest_pred = forest %>% predict(newdata = test)
+
+# The results
+forest_df <- data.frame(
+  id = test %>% select(id),
+  radiation = data %>% 
+    filter(id %in% test_rows) %>% 
+    select(radiation),
+  pred = forest_pred
+)
+
+head(forest_df)
+```
+
+### Evaluation of models
+
+How well did our models work?
+
+```{r, evaluation}
+# Define a function that takes in our results dataframes and returns test RMSE
+rmse <- function(df){
+    (df$radiation - df$pred)^2 %>% mean() %>% sqrt()
+}
+
+# Find the RMSE for each model
+all_data <- data.frame(
+  model_name = c("knn_small", "knn_large", "knn_med", "knn_med2", "elasticnet", "tree_small", "tree", "forest"),
+  rmse_vals = c(rmse(knn_small_df), rmse(knn_large_df), rmse(knn_med_df), rmse(knn_med2_df), rmse(elasticnet_df), rmse(tree_small_df), rmse(tree_df), rmse(forest_df))
+)
+```
+
+```{r, evaluation-viz}
+ggplot(all_data, aes(x = model_name, y = rmse_vals)) +
+  geom_col(aes(fill = rmse_vals)) +
+  geom_text(aes(label = round(rmse_vals, 4)), vjust = -0.5) +
+  labs(
+    title = "Test RMSE Values for Our Models",
+    x = "Model Name",
+    y = "Test RMSE",
+    fill = "Test RMSE"
+  ) +
+  scale_fill_viridis(
+    discrete = FALSE,
+  ) +
+  coord_cartesian(ylim = c(0, 200))
+
+```
+
+## Conclusion
+
+The standard deviation of radiation values in the data is `r sd(data$radiation)`. Our best model was the random forest with a test RMSE of `r rmse(forest_df)`, much lower than the standard deviation. The mid-sized KNN model also did well, with a test RMSE of `r rmse(knn_med_df)`. This suggests that we can predict solar radiation pretty well using other meteorological variables.
+
