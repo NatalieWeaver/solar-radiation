@@ -427,7 +427,7 @@ elasticnet_df <- data.frame(
 
 ---
 name: prediction-models-knn-1
-## K-Nearst Neighbors model
+## K-Nearest Neighbors model
 
 How it works:
 
